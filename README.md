@@ -48,10 +48,10 @@ flash-attn 从 github 源码编译，大概花了半个小时。
 - gsm8k 数据集相较于 math12k 数据集更偏向应用题，会出现 `18 dollars` 这样的答案，但原有打分函数认为 `"18 dollars" != "18"` 而判错，所以新增打分函数 `r1_zero_reward_fn_gsm8k`
 - 由于 vllm 版本较高，以下补丁失效：
     ```python
-        world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
-        profiling_patch = patch("vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling", return_value=None)
+    world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
+    profiling_patch = patch("vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling", return_value=None)
     ```
-    实现 `VLLMServerProxy` 类，让 vllm 单独在另一个进程中运行，设置单独环境变量 `env["CUDA_VISIBLE_DEVICES"] = self._parse_cuda_index(self.device)` 来指定使用的 GPU。
+    因此实现 `VLLMServerProxy` 类，让 vllm 单独在另一个进程中运行，设置环境变量 `env["CUDA_VISIBLE_DEVICES"] = self._parse_cuda_index(self.device)` 来指定使用的 GPU。
 
 ## 参考
 https://github.com/heng380/cs336_assignment-5
