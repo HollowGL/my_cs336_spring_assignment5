@@ -1078,3 +1078,174 @@ def question_only_reward_fn(response, ground_truth, fast=True):
             "answer_reward": 0.0,
             "reward": 0.0
         }
+
+
+_ALLOWED_UNIT_WORDS = [
+    # currency
+    "dollar", "dollars", "cent", "cents", "usd", "eur", "rmb", "yuan",
+    "rupee", "rupees",
+
+    # time
+    "s", "sec", "secs", "second", "seconds",
+    "min", "mins", "minute", "minutes",
+    "h", "hr", "hrs", "hour", "hours",
+    "day", "days", "week", "weeks", "month", "months", "year", "years",
+
+    # length / distance
+    "m", "meter", "meters", "metre", "metres",
+    "cm", "mm", "km",
+    "inch", "inches", "ft", "foot", "feet", "yd", "yard", "yards",
+    "mile", "miles",
+
+    # mass
+    "g", "gram", "grams", "kg", "lb", "lbs",
+
+    # area / volume / speed / physics-ish
+    "m2", "m^2", "cm2", "cm^2", "km2", "km^2",
+    "m3", "m^3", "cm3", "cm^3",
+    "m/s", "km/h", "mph",
+    "l", "liter", "liters", "litre", "litres",
+
+    # math / percentage
+    "%", "percent", "percentage",
+    "deg", "degree", "degrees", "°",
+]
+
+
+def _normalize_number_str(x: str) -> Optional[str]:
+    x = x.strip()
+    if not x:
+        return None
+
+    # fraction like 3/2
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?/\d+(?:\.\d+)?", x):
+        try:
+            a, b = x.split("/")
+            val = float(a) / float(b)
+            if abs(val - round(val)) < 1e-9:
+                return str(int(round(val)))
+            return f"{val:.12f}".rstrip("0").rstrip(".")
+        except Exception:
+            return None
+
+    try:
+        val = float(x)
+        if abs(val - round(val)) < 1e-9:
+            return str(int(round(val)))
+        return f"{val:.12f}".rstrip("0").rstrip(".")
+    except Exception:
+        return None
+
+
+def _build_unit_pattern() -> str:
+    units = sorted(set(_ALLOWED_UNIT_WORDS), key=len, reverse=True)
+    return r"(?:%s)" % "|".join(map(re.escape, units))
+
+
+def _extract_strict_numeric_or_unit_answer(text: str) -> Optional[str]:
+    """
+    只接受：
+      18
+      -3.5
+      3/2
+      $18
+      18 dollars
+      18 km
+      18 kg
+    不接受：
+      answer is 18
+      the final answer is 18 dollars
+      there are 18
+    """
+    if text is None:
+        return None
+
+    s = str(text).strip().lower()
+    s = s.replace("\n", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # 去掉最外层 boxed
+    s = re.sub(r"^\\boxed\{([^{}]+)\}$", r"\1", s)
+
+    unit_pat = _build_unit_pattern()
+    num_pat = r"([-+]?\d+(?:\.\d+)?(?:/\d+(?:\.\d+)?)?)"
+
+    patterns = [
+        rf"^\s*{num_pat}\s*$",
+        rf"^\s*[$€£¥]\s*{num_pat}\s*$",
+        rf"^\s*{num_pat}\s*({unit_pat})\s*$",
+        rf"^\s*[$€£¥]?\s*{num_pat}\s*({unit_pat})\s*$",
+    ]
+
+    for pat in patterns:
+        m = re.fullmatch(pat, s, flags=re.IGNORECASE)
+        if m:
+            # 第一个捕获组始终是数字
+            return _normalize_number_str(m.group(1))
+
+    return None
+
+
+def gsm8k_strict_fallback_grade(model_answer: str, ground_truth) -> bool:
+    if isinstance(ground_truth, list):
+        return any(gsm8k_strict_fallback_grade(model_answer, gt) for gt in ground_truth)
+
+    pred = _extract_strict_numeric_or_unit_answer(str(model_answer))
+    gt = _extract_strict_numeric_or_unit_answer(str(ground_truth))
+
+    if pred is None or gt is None:
+        return False
+
+    if pred == gt:
+        return True
+
+    try:
+        return abs(float(pred) - float(gt)) < 1e-9
+    except Exception:
+        return False
+
+
+def r1_zero_reward_fn_gsm8k(response, ground_truth, fast=True) -> dict[str, float]:
+    if "</think> <answer>" in response and "</answer>" in response:
+        model_answer = response.split("<answer>")[-1].replace("</answer>", "")
+        if "\\boxed" in model_answer:
+            model_answer = extract_answer(model_answer)
+            if model_answer is None:
+                return {
+                    "format_reward": 1.0,
+                    "answer_reward": 0.0,
+                    "reward": 0.0
+                }
+        if isinstance(ground_truth, float) or isinstance(ground_truth, int):
+            ground_truth = str(ground_truth)
+        if isinstance(ground_truth, str):
+            is_correct = grade(model_answer, ground_truth, fast)
+        elif isinstance(ground_truth, list):
+            is_correct = False
+            for gt in ground_truth:
+                is_correct |= grade(model_answer, gt, fast)
+
+        if not is_correct:
+            is_correct = gsm8k_strict_fallback_grade(model_answer, ground_truth)
+
+
+        if is_correct:
+            return {
+                "format_reward": 1.0,
+                "answer_reward": 1.0,
+                "reward": 1.0
+            }
+        else:
+            # Formatted but wrong answer; no format reward to avoid hacking.
+            return {
+                "format_reward": 1.0,
+                "answer_reward": 0.0,
+                "reward": 0.0
+            }
+    else:
+        # Unformatted.
+        return {
+            "format_reward": 0.0,
+            "answer_reward": 0.0,
+            "reward": 0.0
+        }
